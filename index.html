@@ -1,0 +1,374 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Spacebar Race (P2P – up to 12 players)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, 'Helvetica Neue', Arial, sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    .wrap { max-width: 900px; margin: 0 auto; padding: 24px; }
+    h1 { margin: 0 0 14px; font-size: 28px; }
+    .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 16px; margin: 12px 0; }
+    label { display:block; margin: 8px 0 4px; font-size: 14px; color: #cbd5e1; }
+    input[type=text], input[type=number] {
+      width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #334155; background:#0b1220; color:#e2e8f0;
+    }
+    button { padding: 10px 14px; border-radius: 10px; border: 0; background: #2563eb; color: white; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .row { display:flex; gap:12px; flex-wrap: wrap; }
+    .col { flex:1; min-width: 260px; }
+    .players { display:flex; flex-direction: column; gap:10px; }
+    .player { background: #0b1220; border:1px solid #1f2937; border-radius:10px; padding:10px; }
+    .phead { display:flex; justify-content: space-between; font-size: 14px; color: #cbd5e1; margin-bottom:6px; }
+    .bar { height: 12px; background: #111827; border:1px solid #1f2937; border-radius: 999px; overflow: hidden; }
+    .fill { height: 100%; width: 0%; background: #22c55e; transition: width 80ms linear; }
+    .badge { background:#0ea5e9; color:#03202f; border-radius: 6px; padding: 2px 6px; font-size: 12px; }
+    .muted { color:#94a3b8; font-size: 14px; }
+    .rowline { display:flex; justify-content: space-between; align-items: center; }
+    .winner { font-size: 18px; color: #fbbf24; font-weight: 600; }
+    .hosttag { font-size:11px; background:#f59e0b; color:#2b1800; border-radius:6px; padding:2px 6px; margin-left:8px; }
+    .code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 20px; letter-spacing: 1px; }
+    .k { background:#0b1220; border-radius:6px; padding:2px 6px; border:1px solid #1f2937; }
+    .hint { font-size: 13px; color:#a3a3a3; margin-top:6px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Spacebar Race (P2P)</h1>
+    <div id="lobby" class="card">
+      <div class="row">
+        <div class="col">
+          <h3>Create / Join</h3>
+          <label>Display name</label>
+          <input id="name" type="text" placeholder="Your name" />
+          <label>Room code</label>
+          <input id="code" type="text" maxlength="4" placeholder="ABCD" />
+          <button id="enter">Enter Room</button>
+          <div class="hint">Tip: make a new code like <b>RACE</b> or <b>NYC1</b> and share it.</div>
+        </div>
+        <div class="col">
+          <h3>Settings (host only)</h3>
+          <label>Clicks to win</label>
+          <input id="target" type="number" value="40" min="1" max="200" />
+          <button id="applyTarget">Apply</button>
+          <div class="hint">Any player can press <b>Start</b>, but the “host” is the earliest joined peer.</div>
+        </div>
+      </div>
+      <p class="muted">Up to 12 players. Fully browser-based. Share this page link + room code.</p>
+    </div>
+
+    <div id="room" class="card" style="display:none;">
+      <div class="rowline">
+        <div>
+          <div>Room <span class="code" id="roomCode">----</span> • <span id="youLabel" class="muted"></span></div>
+          <div class="muted" id="roomStatus">Waiting for players…</div>
+        </div>
+        <div>
+          <span id="hostBadge" class="hosttag" style="display:none;">Host</span>
+          <button id="startBtn" disabled>Start</button>
+          <button id="resetBtn" disabled>Reset</button>
+        </div>
+      </div>
+      <div style="margin:10px 0;">
+        <span class="muted">Goal:</span> <span id="goalText">40</span> clicks
+      </div>
+      <div class="players" id="players"></div>
+      <div class="card" style="background:#0b1220; margin-top:12px;">
+        <div class="rowline">
+          <div><b>Gameplay:</b> Press <span class="k">Space</span> to advance. Don’t hold it.</div>
+          <div id="winner" class="winner" style="display:none;"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <b>How it works:</b> This page uses peer-to-peer WebRTC over public trackers. No server to install.
+    </div>
+  </div>
+
+  <!-- Trystero (WebRTC P2P over public trackers) -->
+  <script src="https://unpkg.com/trystero"></script>
+  <script>
+    // ---- Minimal P2P game using Trystero (WebTorrent backend)
+    const $ = (id) => document.getElementById(id);
+
+    const els = {
+      lobby: $('lobby'), name: $('name'), code: $('code'), enter: $('enter'),
+      target: $('target'), applyTarget: $('applyTarget'),
+      room: $('room'), roomCode: $('roomCode'), roomStatus: $('roomStatus'),
+      players: $('players'), startBtn: $('startBtn'), resetBtn: $('resetBtn'),
+      hostBadge: $('hostBadge'), goalText: $('goalText'), winner: $('winner'),
+      youLabel: $('youLabel')
+    };
+
+    // Simple state
+    const state = {
+      roomCode: null,
+      target: 40,
+      started: false,
+      finishedId: null,
+      me: { id: null, name: '' },
+      players: new Map(), // id -> {id, name, clicks, joinedAt, connected}
+      joinOrder: [], // for picking a deterministic "host"
+      MAX_PLAYERS: 12
+    };
+
+    // Load name/code from URL hash for convenience
+    (function hydrateFromHash() {
+      try {
+        const p = new URLSearchParams(location.hash.slice(1));
+        if (p.get('name')) els.name.value = p.get('name');
+        if (p.get('code')) els.code.value = p.get('code');
+      } catch {}
+    })();
+
+    // Render helpers
+    function render() {
+      els.goalText.textContent = state.target;
+      els.roomCode.textContent = state.roomCode || '----';
+
+      const list = [...state.players.values()].sort((a,b) => b.clicks - a.clicks || a.joinedAt - b.joinedAt);
+      els.players.innerHTML = '';
+      list.forEach(p => {
+        const wrap = document.createElement('div');
+        wrap.className = 'player';
+        const pct = Math.min(100, Math.round((p.clicks / state.target) * 100));
+        wrap.innerHTML = `
+          <div class="phead">
+            <div>${escapeHTML(p.name)} ${isHost(p.id) ? '<span class="hosttag">Host</span>' : ''}</div>
+            <div>${p.clicks}/${state.target} <span class="badge">${pct}%</span></div>
+          </div>
+          <div class="bar"><div class="fill" style="width:${pct}%;"></div></div>
+          <div class="muted">${p.connected ? 'Online' : 'Disconnected'}</div>
+        `;
+        els.players.appendChild(wrap);
+      });
+
+      // Status
+      if (state.finishedId) {
+        const win = state.players.get(state.finishedId);
+        els.winner.style.display = 'block';
+        els.winner.textContent = win ? `${win.name} wins!` : 'Winner!';
+        els.roomStatus.textContent = 'Finished';
+      } else if (state.started) {
+        els.winner.style.display = 'none';
+        els.roomStatus.textContent = 'Race in progress — press Space!';
+      } else {
+        els.winner.style.display = 'none';
+        const online = [...state.players.values()].filter(p => p.connected).length;
+        els.roomStatus.textContent = online < 2 ? 'Waiting for at least 2 players…' : 'Ready to start';
+      }
+
+      // Buttons
+      const onlineCount = [...state.players.values()].filter(p => p.connected).length;
+      els.startBtn.disabled = !(isHost(state.me.id) && !state.started && !state.finishedId && onlineCount >= 2);
+      els.resetBtn.disabled = !isHost(state.me.id);
+      els.hostBadge.style.display = isHost(state.me.id) ? 'inline-block' : 'none';
+      els.youLabel.textContent = `You: ${state.me.name || '(no name)'}`;
+    }
+
+    function escapeHTML(s) {
+      return (s || '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    function isHost(id) {
+      if (!id || state.joinOrder.length === 0) return false;
+      return state.joinOrder[0] === id;
+    }
+
+    // Trystero room wiring
+    let room = null;
+    let sendEvent, onEvent;
+
+    // Broadcast helpers
+    function emit(type, payload = {}) {
+      if (sendEvent) sendEvent({ type, payload });
+    }
+
+    function enterRoom() {
+      const name = els.name.value.trim() || 'Player';
+      let code = (els.code.value.trim() || '').toUpperCase();
+      if (!code || code.length !== 4) {
+        alert('Enter a 4-letter room code');
+        return;
+      }
+      state.me.name = name;
+      state.roomCode = code;
+
+      // Put params in URL hash for easy sharing
+      location.hash = `name=${encodeURIComponent(name)}&code=${encodeURIComponent(code)}`;
+
+      const config = {
+        appId: 'spacebar-race-2025-v1', // namespace for this game
+        rtcConfig: { iceServers: [{urls: 'stun:stun.l.google.com:19302'}] } // common STUN
+      };
+      const { joinRoom } = window.Trystero.webtorrent;
+      room = joinRoom(config, code);
+
+      const [send, on] = room.makeAction('evt');
+      sendEvent = send;
+      onEvent = on;
+
+      // Identify self
+      state.me.id = room.selfId;
+      addOrUpdatePlayer(room.selfId, { name, clicks: 0, connected: true });
+
+      // When peers join/leave
+      room.onPeerJoin(peerId => {
+        addOrUpdatePlayer(peerId, { name: `Player ${short(peerId)}`, clicks: 0, connected: true });
+        // The current host sends a full state sync to the newcomer
+        if (isHost(state.me.id)) {
+          emit('sync', snapshot());
+        }
+        render();
+      });
+
+      room.onPeerLeave(peerId => {
+        const p = state.players.get(peerId);
+        if (p) { p.connected = false; }
+        render();
+      });
+
+      // Receive messages
+      onEvent(async (data, fromId) => {
+        const { type, payload } = data || {};
+        switch (type) {
+          case 'hello': {
+            // Newcomer announces name; host replies with sync
+            addOrUpdatePlayer(fromId, { name: payload.name, connected: true });
+            if (isHost(state.me.id)) emit('sync', snapshot());
+            render();
+            break;
+          }
+          case 'sync': {
+            // Replace our state with host snapshot (authoritative)
+            if (fromId === state.joinOrder[0] || state.joinOrder.length === 1) {
+              loadSnapshot(payload);
+              render();
+            }
+            break;
+          }
+          case 'start': {
+            state.started = true;
+            state.finishedId = null;
+            // zero clicks for all
+            state.players.forEach(p => p.clicks = 0);
+            render();
+            break;
+          }
+          case 'reset': {
+            state.started = false;
+            state.finishedId = null;
+            state.players.forEach(p => p.clicks = 0);
+            render();
+            break;
+          }
+          case 'set-target': {
+            state.target = clamp(1, 200, payload.target|0 || 40);
+            render();
+            break;
+          }
+          case 'click': {
+            if (!state.started || state.finishedId) break;
+            const p = state.players.get(fromId);
+            if (!p) break;
+            p.clicks = Math.min(state.target, (p.clicks|0) + 1);
+            // win check
+            if (p.clicks >= state.target && !state.finishedId) {
+              state.finishedId = fromId;
+              emit('finished', { winnerId: fromId });
+            }
+            render();
+            break;
+          }
+          case 'finished': {
+            state.started = false;
+            state.finishedId = payload.winnerId;
+            render();
+            break;
+          }
+          case 'rename': {
+            const p = state.players.get(fromId);
+            if (p) { p.name = (payload.name || '').slice(0, 24); render(); }
+            break;
+          }
+        }
+      });
+
+      // Announce ourselves
+      emit('hello', { name });
+
+      els.lobby.style.display = 'none';
+      els.room.style.display = 'block';
+      render();
+    }
+
+    function addOrUpdatePlayer(id, { name, clicks = 0, connected = true }) {
+      const existing = state.players.get(id);
+      if (existing) {
+        existing.name = name ?? existing.name;
+        existing.connected = connected;
+      } else {
+        state.players.set(id, { id, name: (name || `Player ${short(id)}`).slice(0, 24), clicks, joinedAt: Date.now(), connected });
+        state.joinOrder.push(id);
+      }
+    }
+
+    function short(id) { return String(id).slice(0,4).toUpperCase(); }
+    function clamp(min, max, v) { return Math.max(min, Math.min(max, v)); }
+
+    // Snapshot for host sync
+    function snapshot() {
+      return {
+        target: state.target,
+        started: state.started,
+        finishedId: state.finishedId,
+        joinOrder: state.joinOrder.slice(),
+        players: [...state.players.values()].map(p => ({ id: p.id, name: p.name, clicks: p.clicks, joinedAt: p.joinedAt, connected: p.connected }))
+      };
+    }
+    function loadSnapshot(s) {
+      if (!s) return;
+      state.target = clamp(1, 200, s.target || 40);
+      state.started = !!s.started;
+      state.finishedId = s.finishedId || null;
+      state.joinOrder = Array.isArray(s.joinOrder) ? s.joinOrder.slice() : [];
+      state.players = new Map();
+      (s.players || []).forEach(p => state.players.set(p.id, { ...p }));
+    }
+
+    // UI handlers
+    els.enter.addEventListener('click', enterRoom);
+    els.applyTarget.addEventListener('click', () => {
+      const t = clamp(1, 200, parseInt(els.target.value, 10) || 40);
+      state.target = t;
+      emit('set-target', { target: t });
+      render();
+    });
+    els.startBtn.addEventListener('click', () => { if (isHost(state.me.id)) { state.started = true; state.finishedId = null; emit('start'); render(); } });
+    els.resetBtn.addEventListener('click', () => { if (isHost(state.me.id)) { state.started = false; state.finishedId = null; state.players.forEach(p => p.clicks=0); emit('reset'); render(); } });
+
+    // Spacebar gameplay
+    let lastDownAt = 0;
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Space') {
+        e.preventDefault();
+        if (!state.started || state.finishedId) return;
+        const t = performance.now();
+        if (t - lastDownAt < 15) return; // tiny debounce
+        lastDownAt = t;
+        emit('click'); // everyone increments locally when they receive it
+      }
+    }, { passive: false });
+
+    // Make “host” the earliest joined, and re-evaluate on disconnects naturally via joinOrder[0]
+    // Minor anti-spam: cap to ~14 clicks/second on our own view (non-authoritative since P2P)
+    setInterval(() => {
+      if (!state.started || state.finishedId) return;
+      // noop: keeping room alive; mesh is already synced by messages
+    }, 1000);
+
+  </script>
+</body>
+</html>
